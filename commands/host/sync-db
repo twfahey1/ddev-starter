@@ -10,12 +10,25 @@
 ##
 ## Example:
 ##   ddev sync-db
+##
+## Optional setup:
+##   ddev sync-db-setup
+##   (writes .ddev/pantheon.defaults used as project defaults)
 
 set -euo pipefail
 
+DEFAULTS_FILE="${DDEV_APPROOT:-$PWD}/.ddev/pantheon.defaults"
+
 # Project defaults (override by exporting PANTHEON_SITE / PANTHEON_ENVIRONMENT)
-PANTHEON_SITE="${PANTHEON_SITE:-moody-cms}"
-PANTHEON_ENVIRONMENT="${PANTHEON_ENVIRONMENT:-live}"
+PANTHEON_SITE_DEFAULT=""
+PANTHEON_ENVIRONMENT_DEFAULT=""
+if [ -f "$DEFAULTS_FILE" ]; then
+  # shellcheck disable=SC1090
+  source "$DEFAULTS_FILE"
+fi
+
+PANTHEON_SITE="${PANTHEON_SITE:-${PANTHEON_SITE_DEFAULT:-moody-cms}}"
+PANTHEON_ENVIRONMENT="${PANTHEON_ENVIRONMENT:-${PANTHEON_ENVIRONMENT_DEFAULT:-live}}"
 
 DEST_DIR="${DDEV_APPROOT:-$PWD}/database_dumps"
 DB_GZ_REL="database_dumps/db.sql.gz"

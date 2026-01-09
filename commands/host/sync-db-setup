@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+
+## Configure Pantheon defaults for this DDEV project.
+##
+## Usage:
+##   ddev sync-db-setup
+##
+## This writes project defaults to:
+##   .ddev/pantheon.defaults
+##
+## Those defaults are then used by `ddev sync-db` unless overridden by
+## exporting PANTHEON_SITE / PANTHEON_ENVIRONMENT.
+
+set -euo pipefail
+
+APPROOT="${DDEV_APPROOT:-$PWD}"
+DEFAULTS_FILE="${APPROOT}/.ddev/pantheon.defaults"
+
+existing_site=""
+existing_env=""
+
+if [ -f "$DEFAULTS_FILE" ]; then
+  # shellcheck disable=SC1090
+  source "$DEFAULTS_FILE" || true
+  existing_site="${PANTHEON_SITE_DEFAULT:-}"
+  existing_env="${PANTHEON_ENVIRONMENT_DEFAULT:-}"
+fi
+
+site_prompt="Pantheon site machine name"
+env_prompt="Pantheon environment (dev/test/live or multidev)"
+
+if [ -n "$existing_site" ]; then
+  site_prompt+=" [${existing_site}]"
+fi
+if [ -n "$existing_env" ]; then
+  env_prompt+=" [${existing_env}]"
+fi
+
+echo "$site_prompt: "
+read -r site_input
+
+echo "$env_prompt: "
+read -r env_input
+
+site_input="${site_input:-$existing_site}"
+env_input="${env_input:-$existing_env}"
+
+if [ -z "$site_input" ]; then
+  echo "Error: Pantheon site is required." >&2
+  exit 1
+fi
+
+if [ -z "$env_input" ]; then
+  echo "Error: Pantheon environment is required." >&2
+  exit 1
+fi
+
+# Normalize env name a bit.
+env_input=$(echo "$env_input" | tr '[:upper:]' '[:lower:]')
+
+cat > "$DEFAULTS_FILE" <<EOF
+# ddev-generated
+# Project Pantheon defaults for DDEV host commands.
+#
+# Precedence:
+# 1) exported PANTHEON_SITE / PANTHEON_ENVIRONMENT
+# 2) PANTHEON_SITE_DEFAULT / PANTHEON_ENVIRONMENT_DEFAULT (this file)
+# 3) command hard-coded fallbacks
+
+PANTHEON_SITE_DEFAULT="${site_input}"
+PANTHEON_ENVIRONMENT_DEFAULT="${env_input}"
+EOF
+
+echo "Wrote Pantheon defaults to: $DEFAULTS_FILE"
+echo "These will be used by: ddev sync-db"
