@@ -1,15 +1,13 @@
 #!/usr/bin/env bash
 
-## Configure Pantheon defaults for this DDEV project.
+## Description: Configure Pantheon defaults for this DDEV project.
+## Usage: sync-db-setup
+## Example: ddev sync-db-setup
 ##
-## Usage:
-##   ddev sync-db-setup
+## This writes project defaults to `.ddev/pantheon.defaults`.
 ##
-## This writes project defaults to:
-##   .ddev/pantheon.defaults
-##
-## Those defaults are then used by `ddev sync-db` unless overridden by
-## exporting PANTHEON_SITE / PANTHEON_ENVIRONMENT.
+## Those defaults are then used by `ddev sync-db` unless overridden by exporting
+## PANTHEON_SITE / PANTHEON_ENVIRONMENT.
 
 set -euo pipefail
 
