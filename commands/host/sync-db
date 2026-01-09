@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+
+## Sync database from Pantheon into DDEV (similar to Docksal sync-db).
+##
+## Requirements:
+## - You must already be logged in to Terminus on the host machine.
+##   (Run `terminus auth:login` once if needed.)
+##
+## Usage: sync-db
+##
+## Example:
+##   ddev sync-db
+
+set -euo pipefail
+
+# Project defaults (override by exporting PANTHEON_SITE / PANTHEON_ENVIRONMENT)
+PANTHEON_SITE="${PANTHEON_SITE:-moody-cms}"
+PANTHEON_ENVIRONMENT="${PANTHEON_ENVIRONMENT:-live}"
+
+DEST_DIR="${DDEV_APPROOT:-$PWD}/database_dumps"
+DB_GZ_REL="database_dumps/db.sql.gz"
+
+if ! command -v ddev >/dev/null 2>&1; then
+  echo "Error: 'ddev' command not found on PATH." >&2
+  exit 1
+fi
+
+if ! command -v terminus >/dev/null 2>&1; then
+  echo "Error: 'terminus' command not found on PATH." >&2
+  echo "Install Terminus and login: terminus auth:login" >&2
+  exit 1
+fi
+
+mkdir -p "$DEST_DIR"
+rm -f "$DEST_DIR/db.sql" "$DEST_DIR/db.sql.gz"
+
+echo "Checking terminus authentication on host..."
+terminus auth:whoami >/dev/null 2>&1 || {
+  echo "Error: Not logged in to Terminus on the host machine." >&2
+  echo "Run: terminus auth:login" >&2
+  exit 1
+}
+
+echo "Using Pantheon target: ${PANTHEON_SITE}.${PANTHEON_ENVIRONMENT}"
+
+echo "Waking Pantheon environment..."
+terminus env:wake -- "${PANTHEON_SITE}.${PANTHEON_ENVIRONMENT}" >/dev/null
+
+echo "Creating fresh DB backup on Pantheon..."
+terminus backup:create "${PANTHEON_SITE}.${PANTHEON_ENVIRONMENT}" --element=database >/dev/null
+
+echo "Downloading DB backup to $DB_GZ_REL ..."
+terminus backup:get "${PANTHEON_SITE}.${PANTHEON_ENVIRONMENT}" --element=database | xargs -n1 curl -L -o "$DB_GZ_REL"
+
+if [ ! -s "$DEST_DIR/db.sql.gz" ]; then
+  echo "Error: Download failed; $DEST_DIR/db.sql.gz is missing or empty." >&2
+  exit 1
+fi
+
+echo "Importing DB into DDEV..."
+ddev import-db --file="$DEST_DIR/db.sql.gz"
+
+echo "Done: Imported Pantheon ${PANTHEON_SITE}.${PANTHEON_ENVIRONMENT} database."

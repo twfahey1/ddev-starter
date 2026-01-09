@@ -1,0 +1,12 @@
+name: moody-cms
+type: drupal
+docroot: web
+php_version: "8.3"
+database:
+  type: mysql
+  version: "5.7"
+xdebug_enabled: true
+additional_hostnames: []
+additional_fqdns: []
+mailhog_enabled: true
+phpmyadmin_enabled: true
