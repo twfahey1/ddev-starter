@@ -65,4 +65,7 @@ function ddevalize() {
     fi
   fi
 }
+
+alias ddevlize=ddevalize
+
 ```
