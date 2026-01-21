@@ -1,0 +1,234 @@
+#!/usr/bin/env bash
+
+## Rsync specific page assets from Pantheon into the local DDEV project.
+##
+## Usage: rsyncpage <url>
+
+set -euo pipefail
+
+PAGE_URL="${1:-}"
+
+if [ -z "$PAGE_URL" ]; then
+  echo "Error: URL is required" >&2
+  echo "Usage: ddev rsyncpage <url>" >&2
+  exit 1
+fi
+
+if ! command -v terminus >/dev/null 2>&1; then
+  echo "Error: terminus not found on PATH (host)." >&2
+  echo "Install Terminus and ensure you can run: terminus auth:whoami" >&2
+  exit 1
+fi
+
+# Resolve project root/docroot on host.
+DDEV_APPROOT="${DDEV_APPROOT:-$PWD}"
+DOCROOT="${DOCROOT:-${DDEV_DOCROOT:-}}"
+if [ -z "$DOCROOT" ]; then
+  if [ -f "${DDEV_APPROOT}/.ddev/config.yaml" ]; then
+    DOCROOT=$(awk -F': ' '/^docroot:/{print $2; exit}' "${DDEV_APPROOT}/.ddev/config.yaml" | tr -d '"')
+  fi
+fi
+DOCROOT="${DOCROOT:-web}"
+
+DEFAULTS_FILE="${DDEV_APPROOT}/.ddev/pantheon.defaults"
+
+# Project defaults (override by exporting PANTHEON_SITE / PANTHEON_ENVIRONMENT)
+PANTHEON_SITE_DEFAULT=""
+PANTHEON_ENVIRONMENT_DEFAULT=""
+if [ -f "$DEFAULTS_FILE" ]; then
+  # shellcheck disable=SC1090
+  source "$DEFAULTS_FILE"
+fi
+
+# Compatibility with older Docksal variables if they’re present in the shell.
+if [ -z "${PANTHEON_SITE:-}" ] && [ -n "${PROJECT_NAME:-}" ]; then
+  export PANTHEON_SITE="$PROJECT_NAME"
+fi
+if [ -z "${PANTHEON_ENVIRONMENT:-}" ] && [ -n "${PANTHEON_SITE_ENV:-}" ]; then
+  export PANTHEON_ENVIRONMENT="$PANTHEON_SITE_ENV"
+fi
+
+PANTHEON_SITE="${PANTHEON_SITE:-${PANTHEON_SITE_DEFAULT:-}}"
+PANTHEON_ENVIRONMENT="${PANTHEON_ENVIRONMENT:-${PANTHEON_ENVIRONMENT_DEFAULT:-}}"
+
+if [ -z "$PANTHEON_SITE" ] || [ -z "$PANTHEON_ENVIRONMENT" ]; then
+  echo "Error: Missing Pantheon site/env." >&2
+  echo "Set PANTHEON_SITE and PANTHEON_ENVIRONMENT (or run: ddev sync-db-setup)." >&2
+  exit 1
+fi
+
+PANTHEON_TARGET="${PANTHEON_SITE}.${PANTHEON_ENVIRONMENT}"
+
+# Avoid noisy Xdebug output if the host has Xdebug enabled in CLI.
+export XDEBUG_MODE=off
+
+# Ensure terminus is authenticated on host.
+if ! terminus auth:whoami >/dev/null 2>&1; then
+  echo "Error: Terminus is not authenticated on the host." >&2
+  echo "Run: terminus auth:login" >&2
+  exit 1
+fi
+
+# Best-effort: ensure rsync plugin exists.
+terminus self:plugin:install terminus-rsync-plugin >/dev/null 2>&1 || true
+
+TEMP_HTML=$(mktemp)
+
+echo "Fetching page content from: $PAGE_URL"
+curl -s -L \
+  -H "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36" \
+  -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8" \
+  -H "Accept-Language: en-US,en;q=0.5" \
+  -H "Connection: keep-alive" \
+  -H "Upgrade-Insecure-Requests: 1" \
+  "$PAGE_URL" > "$TEMP_HTML"
+
+echo "Debug: First few lines of HTML content:"
+head -n 5 "$TEMP_HTML" || true
+echo "Debug: Looking for img tags:"
+grep -o '<img[^>]*>' "$TEMP_HTML" | head -n 2 || true
+
+echo "Extracting image paths..."
+echo "Debug: Saving full HTML for inspection..."
+cp "$TEMP_HTML" "/tmp/debug_page.html" || true
+echo "Debug: Full HTML saved to /tmp/debug_page.html"
+
+# Extract <img src="..."> values robustly (handles both single/double quotes, whitespace, etc.).
+IMAGE_PATHS=$(python3 - "$TEMP_HTML" <<'PY'
+import sys
+from html.parser import HTMLParser
+
+html_path = sys.argv[1]
+data = open(html_path, 'rb').read().decode('utf-8', errors='ignore')
+
+class ImgSrcParser(HTMLParser):
+  def __init__(self):
+    super().__init__()
+    self.srcs = []
+
+  def handle_starttag(self, tag, attrs):
+    if tag.lower() != 'img':
+      return
+    for k, v in attrs:
+      if k and k.lower() == 'src' and v:
+        self.srcs.append(v)
+
+p = ImgSrcParser()
+p.feed(data)
+
+for s in p.srcs:
+  print(s)
+PY
+)
+
+echo "Debug: Found these image paths:"
+echo "$IMAGE_PATHS" | while read -r path; do
+  [ -z "$path" ] && continue
+  echo "  Found path: '$path'"
+done
+
+TEMP_RSYNC_SCRIPT=$(mktemp)
+
+while IFS= read -r img_path; do
+  # Skip .jpeg.webp files entirely
+  if [[ "$img_path" =~ \.jpeg\.webp$ ]]; then
+    echo "Debug: Skipping .jpeg.webp file: $img_path"
+    continue
+  fi
+
+  echo "Debug: Processing path: '$img_path'"
+
+  # Skip empty lines and external URLs
+  if [[ -z "$img_path" || "$img_path" =~ ^http[s]?:// ]]; then
+    echo "Debug: Skipping - empty or external URL"
+    continue
+  fi
+
+  # Remove leading slash if present
+  img_path="${img_path#/}"
+  echo "Debug: After removing leading slash: '$img_path'"
+
+  # Only process files paths, including those in sites/default/files
+  if [[ "$img_path" == files/* ]] || [[ "$img_path" == */"files/"* ]]; then
+    echo "Debug: Path matches files pattern"
+
+    # Remove any query parameters (everything after ?)
+    img_path=${img_path%%\?*}
+
+    # Ensure path starts with files/
+    if [[ ! "$img_path" =~ ^/?files/ ]]; then
+      if [[ "$img_path" =~ ^/?sites/default/files/ ]]; then
+        img_path=$(echo "$img_path" | sed -E 's|^/?sites/default/files/|files/|')
+      else
+        img_path="files/$img_path"
+      fi
+    fi
+
+    img_path="${img_path#/}"
+
+    echo "Processing: $img_path"
+
+    target_dir="${DDEV_APPROOT}/${DOCROOT}/sites/default/$(dirname "$img_path")"
+    echo "mkdir -p \"$target_dir\" || true" >> "$TEMP_RSYNC_SCRIPT"
+
+    if [[ "$img_path" =~ ^files/styles/ ]]; then
+      source_dir="${DDEV_APPROOT}/${DOCROOT}/sites/default/files/$(echo "$img_path" | sed -E 's|^files/styles/[^/]+/public/||' | xargs dirname)"
+      echo "mkdir -p \"$source_dir\" || true" >> "$TEMP_RSYNC_SCRIPT"
+    fi
+
+    if [[ "$img_path" =~ ^files/styles/ ]]; then
+      source_path=$(echo "$img_path" | sed -E 's|^files/styles/[^/]+/public/|files/|')
+
+      if [[ "$source_path" =~ \.webp$ ]]; then
+        orig_path="${source_path%.webp}"
+        if [[ "$orig_path" =~ \.jpg$ || "$orig_path" =~ \.jpeg$ || "$orig_path" =~ \.png$ ]]; then
+          orig_decoded=$(echo "$orig_path" | python3 -c 'import sys; from urllib.parse import unquote; print(unquote(sys.stdin.read().strip()))')
+          echo "# Only syncing original image for style .webp derivative" >> "$TEMP_RSYNC_SCRIPT"
+          echo "terminus rsync ${PANTHEON_TARGET}:'$orig_decoded' '${DDEV_APPROOT}/${DOCROOT}/sites/default/$orig_decoded' || true" >> "$TEMP_RSYNC_SCRIPT"
+        else
+          echo "Debug: Skipping unknown style .webp derivative: $img_path"
+        fi
+      else
+        decoded_path=$(echo "$source_path" | python3 -c 'import sys; from urllib.parse import unquote; print(unquote(sys.stdin.read().strip()))')
+        echo "# Syncing original image for style derivative" >> "$TEMP_RSYNC_SCRIPT"
+        echo "terminus rsync ${PANTHEON_TARGET}:'$decoded_path' '${DDEV_APPROOT}/${DOCROOT}/sites/default/$decoded_path' || true" >> "$TEMP_RSYNC_SCRIPT"
+      fi
+
+      style_dir="${DDEV_APPROOT}/${DOCROOT}/sites/default/$(dirname "$img_path")"
+      echo "mkdir -p \"$style_dir\"" >> "$TEMP_RSYNC_SCRIPT"
+    else
+      if [[ "$img_path" =~ \.webp$ ]]; then
+        orig_path="${img_path%.webp}"
+
+        if [[ "$orig_path" =~ \.jpg$ ]]; then
+          restored_path="$orig_path"
+        elif [[ "$orig_path" =~ \.jpeg$ ]]; then
+          restored_path="$orig_path"
+        elif [[ "$orig_path" =~ \.png$ ]]; then
+          restored_path="$orig_path"
+        else
+          echo "Debug: Skipping unknown .webp derivative: $img_path"
+          continue
+        fi
+
+        orig_decoded=$(echo "$restored_path" | python3 -c 'import sys; from urllib.parse import unquote; print(unquote(sys.stdin.read().strip()))')
+        echo "# Only syncing original image for .webp derivative" >> "$TEMP_RSYNC_SCRIPT"
+        echo "terminus rsync ${PANTHEON_TARGET}:'$orig_decoded' '${DDEV_APPROOT}/${DOCROOT}/sites/default/$orig_decoded' || true" >> "$TEMP_RSYNC_SCRIPT"
+      else
+        decoded_path=$(echo "$img_path" | python3 -c 'import sys; from urllib.parse import unquote; print(unquote(sys.stdin.read().strip()))')
+        echo "terminus rsync ${PANTHEON_TARGET}:'$decoded_path' '${DDEV_APPROOT}/${DOCROOT}/sites/default/$decoded_path' || true" >> "$TEMP_RSYNC_SCRIPT"
+      fi
+    fi
+  fi
+done <<< "$IMAGE_PATHS"
+
+if [ -s "$TEMP_RSYNC_SCRIPT" ]; then
+  echo "Syncing found images from ${PANTHEON_TARGET}..."
+  bash "$TEMP_RSYNC_SCRIPT"
+else
+  echo "No Pantheon files found to sync"
+fi
+
+rm -f "$TEMP_HTML" "$TEMP_RSYNC_SCRIPT"
+
+echo "Page asset sync completed!"
